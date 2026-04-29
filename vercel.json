@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "name": "vercel-xhttp-relay",
+  "name": "Vercel-Ravesh",
   "rewrites": [
     { "source": "/(.*)", "destination": "/api/index" }
   ],
