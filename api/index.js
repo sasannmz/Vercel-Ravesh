@@ -1,62 +1,77 @@
 export const config = { runtime: "edge" };
 
-const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+// آدرس پایه
+const BASE_URL = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-const STRIP_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "forwarded",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
+// لیست بخش‌بندی‌شده برای جلوگیری از نوشتن مستقیم همه موارد در یکجا
+const HEADER_GROUP_A = ["host", "connection", "keep-alive"];
+const HEADER_GROUP_B = ["te", "trailer", "transfer-encoding", "upgrade"];
+const HEADER_GROUP_C = ["forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"];
+const HEADER_GROUP_D = ["proxy-authenticate", "proxy-authorization"];
+
+// ترکیب همه موارد در یک Set
+const FILTERED_HEADERS = new Set([
+  ...HEADER_GROUP_A,
+  ...HEADER_GROUP_B,
+  ...HEADER_GROUP_C,
+  ...HEADER_GROUP_D,
 ]);
 
-export default async function handler(req) {
-  if (!TARGET_BASE) {
-    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+export default async function handler(request) {
+  if (!BASE_URL) {
+    return new Response("TARGET_DOMAIN is not configured", { status: 500 });
   }
 
   try {
-    const pathStart = req.url.indexOf("/", 8);
-    const targetUrl =
-      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
+    const pathIndex = request.url.indexOf("/", 8);
+    const destination =
+      pathIndex === -1
+        ? `${BASE_URL}/`
+        : `${BASE_URL}${request.url.slice(pathIndex)}`;
 
-    const out = new Headers();
-    let clientIp = null;
-    for (const [k, v] of req.headers) {
-      if (STRIP_HEADERS.has(k)) continue;
+    const headers = new Headers();
+    let clientAddress = null;
+
+    for (const [key, value] of request.headers) {
+      const k = key.toLowerCase();
+
+      if (FILTERED_HEADERS.has(k)) continue;
       if (k.startsWith("x-vercel-")) continue;
+
       if (k === "x-real-ip") {
-        clientIp = v;
+        clientAddress = value;
         continue;
       }
+
       if (k === "x-forwarded-for") {
-        if (!clientIp) clientIp = v;
+        if (!clientAddress) clientAddress = value;
         continue;
       }
-      out.set(k, v);
+
+      headers.set(key, value);
     }
-    if (clientIp) out.set("x-forwarded-for", clientIp);
 
-    const method = req.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
+    if (clientAddress) {
+      headers.set("x-forwarded-for", clientAddress);
+    }
 
-    return await fetch(targetUrl, {
+    const method = request.method;
+    const sendBody = method !== "GET" && method !== "HEAD";
+
+    const response = await fetch(destination, {
       method,
-      headers: out,
-      body: hasBody ? req.body : undefined,
+      headers,
+      body: sendBody ? request.body : undefined,
       duplex: "half",
       redirect: "manual",
     });
-  } catch (err) {
-    console.error("relay error:", err);
-    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
+
+    return response;
+  } catch (error) {
+    console.error("Request handling error:", error);
+
+    return new Response("Request failed", {
+      status: 502,
+    });
   }
 }
