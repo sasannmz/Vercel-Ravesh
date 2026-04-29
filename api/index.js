@@ -1,76 +1,93 @@
+// تنظیم اجرای تابع روی Edge Runtime
 export const config = { runtime: "edge" };
 
-// آدرس پایه
-const BASE_URL = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+// گرفتن دامنه مقصد از env و حذف اسلش انتهایی (اگه وجود داشت)
+const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-// لیست بخش‌بندی‌شده برای جلوگیری از نوشتن مستقیم همه موارد در یکجا
-const HEADER_GROUP_A = ["host", "connection", "keep-alive"];
-const HEADER_GROUP_B = ["te", "trailer", "transfer-encoding", "upgrade"];
-const HEADER_GROUP_C = ["forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"];
-const HEADER_GROUP_D = ["proxy-authenticate", "proxy-authorization"];
-
-// ترکیب همه موارد در یک Set
-const FILTERED_HEADERS = new Set([
-  ...HEADER_GROUP_A,
-  ...HEADER_GROUP_B,
-  ...HEADER_GROUP_C,
-  ...HEADER_GROUP_D,
+// هدرهایی که نباید به مقصد ارسال بشن (برای جلوگیری از مشکلات proxy)
+const HOP_BY_HOP_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
 ]);
 
 export default async function handler(request) {
-  if (!BASE_URL) {
+  // اگر دامنه مقصد تنظیم نشده باشه، خطا برگردون
+  if (!TARGET_BASE) {
     return new Response("TARGET_DOMAIN is not configured", { status: 500 });
   }
 
   try {
+    // استخراج path از URL درخواست ورودی
     const pathIndex = request.url.indexOf("/", 8);
-    const destination =
+    const targetUrl =
       pathIndex === -1
-        ? `${BASE_URL}/`
-        : `${BASE_URL}${request.url.slice(pathIndex)}`;
+        ? `${TARGET_BASE}/`
+        : `${TARGET_BASE}${request.url.slice(pathIndex)}`;
 
-    const headers = new Headers();
-    let clientAddress = null;
+    // ساخت هدرهای جدید برای ارسال به سرور مقصد
+    const outgoingHeaders = new Headers();
+    let clientIp = null;
 
     for (const [key, value] of request.headers) {
-      const k = key.toLowerCase();
+      const lowerKey = key.toLowerCase();
 
-      if (FILTERED_HEADERS.has(k)) continue;
-      if (k.startsWith("x-vercel-")) continue;
+      // حذف هدرهای غیرضروری یا حساس
+      if (HOP_BY_HOP_HEADERS.has(lowerKey)) continue;
 
-      if (k === "x-real-ip") {
-        clientAddress = value;
+      // حذف هدرهای اختصاصی ورسل
+      if (lowerKey.startsWith("x-vercel-")) continue;
+
+      // ذخیره IP واقعی کاربر (در صورت وجود)
+      if (lowerKey === "x-real-ip") {
+        clientIp = value;
         continue;
       }
 
-      if (k === "x-forwarded-for") {
-        if (!clientAddress) clientAddress = value;
+      if (lowerKey === "x-forwarded-for") {
+        if (!clientIp) clientIp = value;
         continue;
       }
 
-      headers.set(key, value);
+      // اضافه کردن سایر هدرها
+      outgoingHeaders.set(key, value);
     }
 
-    if (clientAddress) {
-      headers.set("x-forwarded-for", clientAddress);
+    // اگر IP کاربر مشخص شد، به هدر مقصد اضافه کن
+    if (clientIp) {
+      outgoingHeaders.set("x-forwarded-for", clientIp);
     }
 
     const method = request.method;
-    const sendBody = method !== "GET" && method !== "HEAD";
 
-    const response = await fetch(destination, {
+    // فقط برای متدهایی که body دارن (مثل POST) بدنه ارسال می‌کنیم
+    const shouldSendBody = method !== "GET" && method !== "HEAD";
+
+    // ارسال درخواست به سرور مقصد
+    const response = await fetch(targetUrl, {
       method,
-      headers,
-      body: sendBody ? request.body : undefined,
-      duplex: "half",
-      redirect: "manual",
+      headers: outgoingHeaders,
+      body: shouldSendBody ? request.body : undefined,
+      duplex: "half", // برای استریم در edge
+      redirect: "manual", // جلوگیری از دنبال کردن خودکار ریدایرکت‌ها
     });
 
     return response;
   } catch (error) {
-    console.error("Request handling error:", error);
+    // لاگ خطا برای دیباگ
+    console.error("Proxy/relay error:", error);
 
-    return new Response("Request failed", {
+    return new Response("Bad Request: Tunnel Failed", {
       status: 502,
     });
   }
